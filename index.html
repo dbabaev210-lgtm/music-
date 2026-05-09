@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <title>Музыка ВК</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    body { font-family: Arial, sans-serif; max-width: 700px; margin: 20px auto; padding: 0 15px; background: #f5f5f5; }
+    button, input { padding: 10px; margin: 5px; font-size: 16px; }
+    #auth-block, #player-block, #token-modal { background: white; padding: 20px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+    .hidden { display: none; }
+    ul { list-style: none; padding: 0; }
+    li { cursor: pointer; padding: 8px; border-bottom: 1px solid #eee; display: flex; justify-content: space-between; align-items: center; }
+    li:hover { background: #f0f0f0; }
+    .playing { background: #e3f2fd; font-weight: bold; }
+    audio { width: 100%; margin: 10px 0; }
+    .track-artist { font-size: 0.9em; color: #666; margin-left: 10px; }
+    #search { width: 70%; }
+    .error { color: red; margin: 10px 0; }
+    .manual-token { margin-top: 15px; border-top: 1px solid #ccc; padding-top: 15px; }
+    .manual-token input { width: 70%; }
+    #now-playing { font-style: italic; margin: 5px 0; }
+    /* Модальное окно для показа токена */
+    #token-modal {
+      position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+      background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center;
+    }
+    #token-modal > div {
+      background: white; padding: 25px; border-radius: 12px; max-width: 500px; width: 90%;
+      text-align: center;
+    }
+    #token-display {
+      word-break: break-all; background: #f9f9f9; padding: 10px; margin: 15px 0;
+      border-radius: 6px; user-select: all; font-family: monospace; font-size: 14px;
+    }
+  </style>
+</head>
+<body>
+  <div id="auth-block">
+    <h2>🎵 Музыка ВКонтакте</h2>
+    <p>Авторизуйся, чтобы слушать свою музыку и искать треки.</p>
+    <button id="login-btn">Войти через ВК (на этом устройстве)</button>
+    <div class="manual-token">
+      <p>Или вставь токен, полученный на ПК:</p>
+      <input type="text" id="token-input" placeholder="access_token...">
+      <button id="use-token-btn">Использовать токен</button>
+    </div>
+    <div id="error-msg" class="error"></div>
+  </div>
+
+  <!-- Модальное окно для показа токена после авторизации -->
+  <div id="token-modal" class="hidden">
+    <div>
+      <h3>Твой токен доступа</h3>
+      <p>Скопируй его сейчас, чтобы использовать на другом устройстве:</p>
+      <div id="token-display"></div>
+      <button id="copy-token-btn">Копировать</button>
+      <button id="continue-btn" style="margin-left:10px;">Продолжить на этом устройстве</button>
+    </div>
+  </div>
+
+  <div id="player-block" class="hidden">
+    <h2>Мой плеер</h2>
+    <div>
+      <input type="text" id="search" placeholder="Поиск по музыке ВК...">
+      <button id="search-btn">Найти</button>
+    </div>
+    <audio id="audio" controls></audio>
+    <div id="now-playing">Ничего не играет</div>
+    <h3>Мои аудиозаписи</h3>
+    <ul id="track-list"></ul>
+    <button id="logout-btn" style="margin-top:15px;">Выйти</button>
+  </div>
+
+  <script>
+    const APP_ID = '54585763'; // <-- ВСТАВЬ СВОЙ ID
+    const REDIRECT_URI = window.location.origin + window.location.pathname;
+    const API_VERSION = '5.131';
+    let accessToken = localStorage.getItem('vk_token');
+
+    // DOM элементы
+    const authBlock = document.getElementById('auth-block');
+    const playerBlock = document.getElementById('player-block');
+    const loginBtn = document.getElementById('login-btn');
+    const logoutBtn = document.getElementById('logout-btn');
+    const useTokenBtn = document.getElementById('use-token-btn');
+    const tokenInput = document.getElementById('token-input');
+    const audio = document.getElementById('audio');
+    const trackList = document.getElementById('track-list');
+    const searchInput = document.getElementById('search');
+    const searchBtn = document.getElementById('search-btn');
+    const nowPlaying = document.getElementById('now-playing');
+    const errorMsg = document.getElementById('error-msg');
+    const tokenModal = document.getElementById('token-modal');
+    const tokenDisplay = document.getElementById('token-display');
+    const copyTokenBtn = document.getElementById('copy-token-btn');
+    const continueBtn = document.getElementById('continue-btn');
+
+    let currentTrackIndex = -1;
+    let tracks = [];
+
+    function showError(text) {
+      errorMsg.textContent = text;
+      errorMsg.classList.remove('hidden');
+    }
+    function hideError() {
+      errorMsg.textContent = '';
+      errorMsg.classList.add('hidden');
+    }
+
+    // Попытка авторизации через токен в URL (если зашли с редиректа)
+    function processUrlToken() {
+      if (window.location.hash) {
+        const params = new URLSearchParams(window.location.hash.substring(1));
+        const token = params.get('access_token');
+        if (token) {
+          // Показываем модальное окно с токеном
+          tokenDisplay.textContent = token;
+          tokenModal.classList.remove('hidden');
+          // Не удаляем хэш пока пользователь не решит
+          return true;
+        }
+      }
+      return false;
+    }
+
+    // Если токен уже сохранён в localStorage – сразу показываем плеер
+    if (accessToken) {
+      authBlock.classList.add('hidden');
+      playerBlock.classList.remove('hidden');
+      loadMyAudios();
+    } else {
+      // Проверяем, есть ли свежий токен в URL (после редиректа)
+      if (!processUrlToken()) {
+        // Нет токена в URL – показываем экран входа
+        authBlock.classList.remove('hidden');
+        playerBlock.classList.add('hidden');
+      } else {
+        // Есть токен в URL, модальное окно открыто, скрываем экран входа
+        authBlock.classList.add('hidden');
+        playerBlock.classList.add('hidden');
+      }
+    }
+
+    // Кнопка "Копировать" в модальном окне
+    copyTokenBtn.addEventListener('click', () => {
+      navigator.clipboard.writeText(tokenDisplay.textContent).then(() => {
+        alert('Токен скопирован! Теперь вставь его на другом устройстве.');
+      }).catch(() => {
+        // Если не поддерживается clipboard API, просто выделяем
+        const range = document.createRange();
+        range.selectNode(tokenDisplay);
+        window.getSelection().removeAllRanges();
+        window.getSelection().addRange(range);
+        alert('Выделите и скопируйте токен вручную (Ctrl+C)');
+      });
+    });
+
+    // Кнопка "Продолжить на этом устройстве"
+    continueBtn.addEventListener('click', () => {
+      accessToken = tokenDisplay.textContent;
+      localStorage.setItem('vk_token', accessToken);
+      // Чистим URL
+      window.history.replaceState({}, document.title, window.location.pathname);
+      tokenModal.classList.add('hidden');
+      playerBlock.classList.remove('hidden');
+      loadMyAudios();
+    });
+
+    // Стандартная авторизация (редирект на этом же устройстве)
+    loginBtn.addEventListener('click', () => {
+      hideError();
+      const authUrl = `https://oauth.vk.com/authorize?client_id=${APP_ID}&display=page&redirect_uri=${encodeURIComponent(REDIRECT_URI)}&scope=audio&response_type=token&v=${API_VERSION}`;
+      window.location.href = authUrl;
+    });
+
+    // Ручной ввод токена
+    useTokenBtn.addEventListener('click', () => {
+      hideError();
+      const token = tokenInput.value.trim();
+      if (!token) {
+        showError('Введи токен');
+        return;
+      }
+      if (!token.startsWith('vk1.a')) {
+        showError('Похоже, токен некорректный (должен начинаться с vk1.a)');
+        return;
+      }
+      accessToken = token;
+      localStorage.setItem('vk_token', token);
+      authBlock.classList.add('hidden');
+      playerBlock.classList.remove('hidden');
+      loadMyAudios();
+    });
+
+    // Выход
+    logoutBtn.addEventListener('click', () => {
+      localStorage.removeItem('vk_token');
+      accessToken = null;
+      tracks = [];
+      trackList.innerHTML = '';
+      audio.src = '';
+      nowPlaying.textContent = 'Ничего не играет';
+      authBlock.classList.remove('hidden');
+      playerBlock.classList.add('hidden');
+      tokenInput.value = '';
+    });
+
+    // Запрос к API ВК
+    async function apiCall(method, params) {
+      params.access_token = accessToken;
+      params.v = API_VERSION;
+      const query = new URLSearchParams(params).toString();
+      const response = await fetch(`https://api.vk.com/method/${method}?${query}`);
+      const data = await response.json();
+      if (data.error) {
+        if (data.error.error_code === 5 || data.error.error_code === 16) {
+          localStorage.removeItem('vk_token');
+          accessToken = null;
+          authBlock.classList.remove('hidden');
+          playerBlock.classList.add('hidden');
+          showError('Токен устарел. Войди заново.');
+        } else {
+          showError(`Ошибка VK: ${data.error.error_msg}`);
+        }
+        return null;
+      }
+      return data.response;
+    }
+
+    async function loadMyAudios() {
+      hideError();
+      const response = await apiCall('audio.get', { count: 100 });
+      if (!response) return;
+      tracks = response.items || [];
+      renderTracks();
+    }
+
+    async function searchTracks(query) {
+      if (!query.trim()) return;
+      hideError();
+      const response = await apiCall('audio.search', { q: query, count: 50 });
+      if (!response) return;
+      tracks = response.items || [];
+      renderTracks();
+    }
+
+    function renderTracks() {
+      trackList.innerHTML = '';
+      if (tracks.length === 0) {
+        trackList.innerHTML = '<li>Ничего не найдено</li>';
+        return;
+      }
+      tracks.forEach((track, index) => {
+        const li = document.createElement('li');
+        li.innerHTML = `<span>${track.artist} - ${track.title}</span><span class="track-artist">${formatTime(track.duration)}</span>`;
+        li.addEventListener('click', () => playTrack(index));
+        if (index === currentTrackIndex) li.classList.add('playing');
+        trackList.appendChild(li);
+      });
+    }
+
+    function playTrack(index) {
+      if (!tracks[index] || !tracks[index].url) {
+        showError('Нет ссылки для воспроизведения');
+        return;
+      }
+      currentTrackIndex = index;
+      audio.src = tracks[index].url;
+      audio.play().catch(() => {});
+      nowPlaying.textContent = `${tracks[index].artist} - ${tracks[index].title}`;
+      renderTracks();
+    }
+
+    audio.addEventListener('ended', () => {
+      if (tracks.length > 0 && currentTrackIndex < tracks.length - 1) {
+        playTrack(currentTrackIndex + 1);
+      } else {
+        currentTrackIndex = -1;
+        nowPlaying.textContent = 'Воспроизведение завершено';
+        audio.src = '';
+        renderTracks();
+      }
+    });
+
+    searchBtn.addEventListener('click', () => {
+      searchTracks(searchInput.value);
+    });
+    searchInput.addEventListener('keypress', (e) => {
+      if (e.key === 'Enter') searchTracks(searchInput.value);
+    });
+
+    function formatTime(seconds) {
+      if (!seconds) return '0:00';
+      const m = Math.floor(seconds / 60);
+      const s = seconds % 60;
+      return `${m}:${s.toString().padStart(2, '0')}`;
+    }
+  </script>
+</body>
+</html>
